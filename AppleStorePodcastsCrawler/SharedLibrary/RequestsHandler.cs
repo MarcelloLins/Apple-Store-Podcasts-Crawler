@@ -35,5 +35,22 @@ namespace SharedLibrary
 
             return htmlResponse;
         }
+
+        public string Get (string url, bool useProxies)
+        {
+            using (WebRequests httpClient = new WebRequests ())
+            {
+                // Should this request use HTTP Proxies ?
+                if (useProxies)
+                {
+                    httpClient.Proxy = ProxiesLoader.GetWebProxy ();
+                }
+
+                httpClient.UserAgent = Consts.USER_AGENT;
+                string htmlResponse  = httpClient.Get (url);
+
+                return htmlResponse;
+            }
+        }
     }
 }
