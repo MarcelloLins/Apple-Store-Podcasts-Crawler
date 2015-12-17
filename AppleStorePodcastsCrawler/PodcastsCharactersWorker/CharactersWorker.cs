@@ -14,16 +14,16 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
 
-namespace PodcastsCategoriesWorker
+namespace PodcastsCharactersWorker
 {
-    public class CategoriesWorker
+    class Program
     {
         // Logging Tool
         private static Logger _logger;
 
         // Configuration Values
-        private static string _categoriesQueueName;
         private static string _characterUrlsQueueName;
+        private static string _podcastUrlsQueueName;
         private static string _awsKey;
         private static string _awsKeySecret;
         private static int    _maxRetries;
@@ -39,7 +39,7 @@ namespace PodcastsCategoriesWorker
             AppStoreParser  parser     = new AppStoreParser ();
 
             // Loading Configuration
-            LogSetup.InitializeLog ("Apple_Podcasts_Categories_Worker.log", "info");
+            LogSetup.InitializeLog ("Apple_Podcasts_CharacterUrls_Worker.log", "info");
             _logger = LogManager.GetCurrentClassLogger ();
 
             // Loading Config
@@ -82,8 +82,8 @@ namespace PodcastsCategoriesWorker
 
             // AWS Queue Handler
             _logger.Info ("Initializing Queues");
-            AWSSQSHelper categoriesUrlQueue = new AWSSQSHelper (_categoriesQueueName   , _maxMessagesPerDequeue, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
             AWSSQSHelper charactersUrlQueue = new AWSSQSHelper (_characterUrlsQueueName, _maxMessagesPerDequeue, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
+            AWSSQSHelper podcastUrlsQueue   = new AWSSQSHelper (_podcastUrlsQueueName  , _maxMessagesPerDequeue, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
 
             // Setting Error Flag to No Error ( 0 )
             System.Environment.ExitCode = 0;
@@ -91,21 +91,21 @@ namespace PodcastsCategoriesWorker
             // Initialiazing Control Variables
             int fallbackWaitTime = 1;
 
-            _logger.Info ("Started Processing Category Urls");
+            _logger.Info ("Started Processing Character Urls");
 
             do
             {
                 try
                 {
                     // Dequeueing messages from the Queue
-                    if (!categoriesUrlQueue.DeQueueMessages())
+                    if (!charactersUrlQueue.DeQueueMessages ())
                     {
                         Thread.Sleep (_hiccupTime); // Hiccup                   
                         continue;
                     }
 
                     // Checking for no message received, and false positives situations
-                    if (!categoriesUrlQueue.AnyMessageReceived())
+                    if (!charactersUrlQueue.AnyMessageReceived ())
                     {
                         // If no message was found, increases the wait time
                         int waitTime;
@@ -116,14 +116,14 @@ namespace PodcastsCategoriesWorker
                         }
                         else // Reseting Wait after 12 fallbacks
                         {
-                            waitTime         = 2000;
+                            waitTime = 2000;
                             fallbackWaitTime = 0;
                         }
 
                         fallbackWaitTime++;
 
                         // Sleeping before next try
-                        _logger.Info ("Fallback (seconds) => " + waitTime);
+                        Console.WriteLine ("Fallback (seconds) => " + waitTime);
                         Thread.Sleep (waitTime);
                         continue;
                     }
@@ -132,10 +132,10 @@ namespace PodcastsCategoriesWorker
                     fallbackWaitTime = 1;
 
                     // Iterating over dequeued Messages
-                    foreach (var categoryUrl in categoriesUrlQueue.GetDequeuedMessages())
+                    foreach (var characterUrl in charactersUrlQueue.GetDequeuedMessages ())
                     {
                         // Console Feedback
-                        _logger.Info ("Started Parsing Category : " + categoryUrl.Body);
+                        _logger.Info ("Started Parsing Url : " + characterUrl.Body);
 
                         try
                         {
@@ -147,12 +147,15 @@ namespace PodcastsCategoriesWorker
                             do
                             {
                                 // Executing Http Request for the Category Url
-                                htmlResponse = httpClient.Get (categoryUrl.Body, shouldUseProxies);
+                                htmlResponse = httpClient.Get (characterUrl.Body, shouldUseProxies);
 
                                 if (String.IsNullOrEmpty (htmlResponse))
                                 {
-                                    _logger.Error ("Retrying Request for Category Page");
+                                    _logger.Info ("Retrying Request for Character Page");
                                     retries++;
+
+                                    // Small Hiccup
+                                    Thread.Sleep (_hiccupTime);
                                 }
 
                             } while (String.IsNullOrWhiteSpace (htmlResponse) && retries <= _maxRetries);
@@ -161,22 +164,40 @@ namespace PodcastsCategoriesWorker
                             if (String.IsNullOrWhiteSpace (htmlResponse))
                             {
                                 // Deletes Message and moves on
-                                categoriesUrlQueue.DeleteMessage (categoryUrl);
+                                charactersUrlQueue.DeleteMessage (characterUrl);
                                 continue;
                             }
 
-                            // If the request worked, parses the urls out of the page
-                            // Enqueueing Urls
-                            var characterUrls = parser.ParseCharacterUrls (htmlResponse).ToList();
-                            List<String> encodedUrls = new List<String> ();
+                            // Hashset of urls processed (to avoid duplicates)
+                            HashSet<String> urlsQueued = new HashSet<String> ();
 
-                            // Encoding Urls to remove "&AMP;" and similar cases
-                            foreach(var characterUrl in characterUrls)
+                            // If the URL is not a "Page" Url and for the presence of "Page" itens within the HTML
+                            if (characterUrl.Body.IndexOf ("&page=", StringComparison.InvariantCultureIgnoreCase) < 0 && parser.HasPageIndexes(htmlResponse))
                             {
-                                encodedUrls.Add(HttpUtility.HtmlDecode (characterUrl));
-                            }
+                                // Feedback
+                                _logger.Info ("Found 'ROOT' URL For this Category : {0}", characterUrl.Body);
 
-                            charactersUrlQueue.EnqueueMessages (encodedUrls);
+                                // Executing Request and Queueing Urls until there's no other Url to be queued
+                                // If the request worked, parses the Urls out of the page and queue them into the same queue
+                                var numericUrls = parser.ParseNumericUrls (htmlResponse).Select (t => HttpUtility.HtmlDecode (t)).Distinct().ToList();
+                                
+                                // Enqueueing Urls
+                                charactersUrlQueue.EnqueueMessages (numericUrls);                   
+                            }
+                            else // The Url is a "Page" one
+                            {
+                                // Parsing Podcast urls
+                                // Feedback
+                                _logger.Info ("Found 'PAGE NUMBER' URL For this Category : {0}", characterUrl.Body);
+
+                                var podcastUrls = parser.ParsePodcastUrls (htmlResponse).Select (t => HttpUtility.HtmlDecode (t)).ToList ();
+                                
+                                // Decoding the urls
+                                podcastUrls.ForEach (t => HttpUtility.HtmlDecode (t));
+
+                                // Enqueueing Urls
+                                podcastUrlsQueue.EnqueueMessages (podcastUrls);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -184,8 +205,7 @@ namespace PodcastsCategoriesWorker
                         }
                         finally
                         {
-                            // Deleting the message
-                            categoriesUrlQueue.DeleteMessage(categoryUrl);
+                            charactersUrlQueue.DeleteMessage (characterUrl);
                         }
                     }
                 }
@@ -201,8 +221,8 @@ namespace PodcastsCategoriesWorker
         {
             _maxRetries             = ConfigurationReader.LoadConfigurationSetting<int>    ("MaxRetries"           , 0);
             _maxMessagesPerDequeue  = ConfigurationReader.LoadConfigurationSetting<int>    ("MaxMessagesPerDequeue", 10);
-            _categoriesQueueName    = ConfigurationReader.LoadConfigurationSetting<String> ("AWSCategoriesQueue"   , String.Empty);
             _characterUrlsQueueName = ConfigurationReader.LoadConfigurationSetting<String> ("AWSCharacterUrlsQueue", String.Empty);
+            _podcastUrlsQueueName   = ConfigurationReader.LoadConfigurationSetting<String> ("AWSPodcastUrlsQueue"  , String.Empty);
             _awsKey                 = ConfigurationReader.LoadConfigurationSetting<String> ("AWSKey"               , String.Empty);
             _awsKeySecret           = ConfigurationReader.LoadConfigurationSetting<String> ("AWSKeySecret"         , String.Empty);
         }

@@ -77,7 +77,7 @@ namespace PodcastsBootstrapper
 
             // AWS Queue Handler
             _logger.Info ("Initializing Queues");
-            AWSSQSHelper sqsWrapper = new AWSSQSHelper (_categoriesQueueName, 10, _awsKey, _awsKeySecret);
+            AWSSQSHelper sqsWrapper = new AWSSQSHelper (_categoriesQueueName, 10, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
 
             // Step 1 - Trying to obtain the root page html (source of all the apps)
             var rootPageResponse = httpClient.GetRootPage (shouldUseProxies);
@@ -90,17 +90,15 @@ namespace PodcastsBootstrapper
             }
 
             // Step 2 - Extracting Category Urls from the Root Page and queueing their Urls
-            foreach (var categoryUrl in parser.ParseCategoryUrls (rootPageResponse))
-            {
-                // Logging Feedback
-                _logger.Info ("Queueing Category : " + categoryUrl);
+            // Logging Feedback
+            _logger.Info ("Queueing Categories");
 
-                // Queueing Category Urls
-                sqsWrapper.EnqueueMessage (categoryUrl);
-            }
+            // Queueing Category Urls
+            var categoryUrls = parser.ParseCategoryUrls (rootPageResponse).ToList ();
+
+            sqsWrapper.EnqueueMessages (categoryUrls);
 
             _logger.Info ("End of Bootstrapping phase");
-
         }
 
         private static void LoadConfiguration ()
