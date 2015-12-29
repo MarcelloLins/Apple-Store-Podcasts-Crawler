@@ -3,6 +3,8 @@ using SharedLibrary;
 using SharedLibrary.AWS;
 using SharedLibrary.ConfigurationReader;
 using SharedLibrary.Log;
+using SharedLibrary.Models;
+using SharedLibrary.MongoDB;
 using SharedLibrary.Parsing;
 using SharedLibrary.Proxies;
 using System;
@@ -12,34 +14,42 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web;
 
-namespace PodcastsCategoriesWorker
+namespace PodcastsWorker
 {
-    public class CategoriesWorker
+    class PodcastsWorker
     {
         // Logging Tool
         private static Logger _logger;
 
         // Configuration Values
-        private static string _categoriesQueueName;
-        private static string _characterUrlsQueueName;
+        private static string _podcastUrlsQueueName;
         private static string _awsKey;
         private static string _awsKeySecret;
         private static int    _maxRetries;
         private static int    _maxMessagesPerDequeue;
+
+        // Configuration - Database
+        private static string _mongoServer;
+        private static int    _mongoPort;     
+        private static string _mongoUser;     
+        private static string _mongoPass;
+        private static string _mongoDatabase;
+        private static string _mongoCollection;
+        private static string _mongoAuthDatabase;
+        private static int    _mongoTimeout;
 
         // Control Variables
         private static int    _hiccupTime = 1000;
 
         static void Main (string[] args)
         {
-            // Creating Needed Instances
+             // Creating Needed Instances
             RequestsHandler httpClient = new RequestsHandler ();
             PodcastsParser  parser     = new PodcastsParser ();
 
             // Loading Configuration
-            LogSetup.InitializeLog ("Apple_Podcasts_Categories_Worker.log", "info");
+            LogSetup.InitializeLog ("Apple_Store_Urls_Worker.log", "info");
             _logger = LogManager.GetCurrentClassLogger ();
 
             // Loading Config
@@ -80,32 +90,37 @@ namespace PodcastsCategoriesWorker
                 }
             }
 
+            // MongoDB
+            _logger.Info ("Initializing Database");
+            MongoDBWrapper mongoDB = new MongoDBWrapper ();
+            string serverAddr = String.Join (":", _mongoServer, _mongoPort);
+            mongoDB.ConfigureDatabase (_mongoUser, _mongoPass, _mongoAuthDatabase, serverAddr, _mongoTimeout, _mongoDatabase, _mongoCollection);
+
             // AWS Queue Handler
             _logger.Info ("Initializing Queues");
-            AWSSQSHelper categoriesUrlQueue = new AWSSQSHelper (_categoriesQueueName   , _maxMessagesPerDequeue, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
-            AWSSQSHelper charactersUrlQueue = new AWSSQSHelper (_characterUrlsQueueName, _maxMessagesPerDequeue, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
-
+            AWSSQSHelper podcastsUrlsQueue = new AWSSQSHelper (_podcastUrlsQueueName , _maxMessagesPerDequeue, Amazon.RegionEndpoint.USEast1, _awsKey, _awsKeySecret);
+                        
             // Setting Error Flag to No Error ( 0 )
             System.Environment.ExitCode = 0;
 
             // Initialiazing Control Variables
             int fallbackWaitTime = 1;
 
-            _logger.Info ("Started Processing Category Urls");
+            _logger.Info ("Started Processing Individual Podcast Urls");
 
             do
             {
                 try
                 {
                     // Dequeueing messages from the Queue
-                    if (!categoriesUrlQueue.DeQueueMessages())
+                    if (!podcastsUrlsQueue.DeQueueMessages ())
                     {
                         Thread.Sleep (_hiccupTime); // Hiccup                   
                         continue;
                     }
 
                     // Checking for no message received, and false positives situations
-                    if (!categoriesUrlQueue.AnyMessageReceived())
+                    if (!podcastsUrlsQueue.AnyMessageReceived ())
                     {
                         // If no message was found, increases the wait time
                         int waitTime;
@@ -116,14 +131,14 @@ namespace PodcastsCategoriesWorker
                         }
                         else // Reseting Wait after 12 fallbacks
                         {
-                            waitTime         = 2000;
+                            waitTime = 2000;
                             fallbackWaitTime = 0;
                         }
 
                         fallbackWaitTime++;
 
                         // Sleeping before next try
-                        _logger.Info ("Fallback (seconds) => " + waitTime);
+                        Console.WriteLine ("Fallback (seconds) => " + waitTime);
                         Thread.Sleep (waitTime);
                         continue;
                     }
@@ -132,10 +147,16 @@ namespace PodcastsCategoriesWorker
                     fallbackWaitTime = 1;
 
                     // Iterating over dequeued Messages
-                    foreach (var categoryUrl in categoriesUrlQueue.GetDequeuedMessages())
+                    foreach (var appUrl in podcastsUrlsQueue.GetDequeuedMessages ())
                     {
-                        // Console Feedback
-                        _logger.Info ("Started Parsing Category : " + categoryUrl.Body);
+                        if (appUrl.Body.IndexOf ("https://itunes.apple.com/us/podcast") < 0 && appUrl.Body.IndexOf ("https://itunes.apple.com/podcast/") < 0)
+                        {
+                            _logger.Info ("Invalid Message. Deleting [{0}]", appUrl.Body);
+                            podcastsUrlsQueue.DeleteMessage (appUrl);
+                            continue;
+                        }
+
+                        bool processingWorked = true;
 
                         try
                         {
@@ -147,12 +168,17 @@ namespace PodcastsCategoriesWorker
                             do
                             {
                                 // Executing Http Request for the Category Url
-                                htmlResponse = httpClient.Get (categoryUrl.Body, shouldUseProxies);
+                                htmlResponse = httpClient.Get (appUrl.Body, shouldUseProxies);
 
                                 if (String.IsNullOrEmpty (htmlResponse))
                                 {
-                                    _logger.Error ("Retrying Request for Category Page");
+                                    // Extending Fallback time
                                     retries++;
+                                    int sleepTime = retries * _hiccupTime <= 30000 ? retries * _hiccupTime : 30000;
+
+                                    _logger.Info ("Retrying Request for Podcast Page [ " + sleepTime / 1000 + " ]");
+
+                                    Thread.Sleep (sleepTime);
                                 }
 
                             } while (String.IsNullOrWhiteSpace (htmlResponse) && retries <= _maxRetries);
@@ -160,32 +186,38 @@ namespace PodcastsCategoriesWorker
                             // Checking if retries failed
                             if (String.IsNullOrWhiteSpace (htmlResponse))
                             {
-                                // Deletes Message and moves on
-                                categoriesUrlQueue.DeleteMessage (categoryUrl);
                                 continue;
                             }
 
-                            // If the request worked, parses the urls out of the page
-                            // Enqueueing Urls
-                            var characterUrls = parser.ParseCharacterUrls (htmlResponse).ToList();
-                            List<String> encodedUrls = new List<String> ();
+                            // Feedback
+                            _logger.Info ("Current page " + appUrl.Body, "Parsing Podcast Data");
 
-                            // Encoding Urls to remove "&AMP;" and similar cases
-                            foreach(var characterUrl in characterUrls)
-                            {
-                                encodedUrls.Add(HttpUtility.HtmlDecode (characterUrl));
-                            }
+                            // Parsing Data out of the Html Page
+                            AppleStorePodcastModel parsedPodcast = parser.ParsePodcastPage (htmlResponse);
+                            parsedPodcast.url                    = appUrl.Body;
+                            parsedPodcast._id                    = appUrl.Body;
 
-                            charactersUrlQueue.EnqueueMessages (encodedUrls);
+                            // Storing Podcast Data on MongoDB
+                            mongoDB.Insert (parsedPodcast);
+
+                            // Little Hiccup
+                            Thread.Sleep (_hiccupTime);
+
                         }
                         catch (Exception ex)
                         {
                             _logger.Error (ex);
+
+                            // Setting Flag to "False"
+                            processingWorked = false;
                         }
                         finally
                         {
-                            // Deleting the message
-                            categoriesUrlQueue.DeleteMessage(categoryUrl);
+                            //Deleting the message - Only if the processing worked
+                            if (processingWorked)
+                            {
+                                podcastsUrlsQueue.DeleteMessage (appUrl);
+                            }
                         }
                     }
                 }
@@ -201,10 +233,18 @@ namespace PodcastsCategoriesWorker
         {
             _maxRetries             = ConfigurationReader.LoadConfigurationSetting<int>    ("MaxRetries"           , 0);
             _maxMessagesPerDequeue  = ConfigurationReader.LoadConfigurationSetting<int>    ("MaxMessagesPerDequeue", 10);
-            _categoriesQueueName    = ConfigurationReader.LoadConfigurationSetting<String> ("AWSCategoriesQueue"   , String.Empty);
-            _characterUrlsQueueName = ConfigurationReader.LoadConfigurationSetting<String> ("AWSCharacterUrlsQueue", String.Empty);
+            _podcastUrlsQueueName   = ConfigurationReader.LoadConfigurationSetting<String> ("AWSPodcastUrlsQueue"  , String.Empty);
             _awsKey                 = ConfigurationReader.LoadConfigurationSetting<String> ("AWSKey"               , String.Empty);
             _awsKeySecret           = ConfigurationReader.LoadConfigurationSetting<String> ("AWSKeySecret"         , String.Empty);
+
+            _mongoServer            = ConfigurationReader.LoadConfigurationSetting<String> ("MONGO_SERVER"         , String.Empty);
+            _mongoPort              = ConfigurationReader.LoadConfigurationSetting<int> ("MONGO_PORT"              , 21766);
+            _mongoUser              = ConfigurationReader.LoadConfigurationSetting<String> ("MONGO_USER"           , String.Empty);
+            _mongoPass              = ConfigurationReader.LoadConfigurationSetting<String> ("MONGO_PASS"           , String.Empty);
+            _mongoDatabase          = ConfigurationReader.LoadConfigurationSetting<String> ("MONGO_DATABASE"       , String.Empty);
+            _mongoCollection        = ConfigurationReader.LoadConfigurationSetting<String> ("MONGO_COLLECTION"     , String.Empty);
+            _mongoAuthDatabase      = ConfigurationReader.LoadConfigurationSetting<String> ("MONGO_AUTH_DB"        , String.Empty);
+            _mongoTimeout           = ConfigurationReader.LoadConfigurationSetting<int> ("MONGO_TIMEOUT"           , 16000);
         }
     }
 }

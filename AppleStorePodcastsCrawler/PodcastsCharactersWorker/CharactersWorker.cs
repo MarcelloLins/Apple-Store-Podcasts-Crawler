@@ -36,7 +36,7 @@ namespace PodcastsCharactersWorker
         {
             // Creating Needed Instances
             RequestsHandler httpClient = new RequestsHandler ();
-            AppStoreParser  parser     = new AppStoreParser ();
+            PodcastsParser  parser     = new PodcastsParser ();
 
             // Loading Configuration
             LogSetup.InitializeLog ("Apple_Podcasts_CharacterUrls_Worker.log", "info");

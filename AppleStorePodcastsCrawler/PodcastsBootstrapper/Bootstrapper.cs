@@ -28,7 +28,7 @@ namespace PodcastsBootstrapper
         {
             // Creating Needed Instances
             RequestsHandler httpClient = new RequestsHandler ();
-            AppStoreParser  parser     = new AppStoreParser ();
+            PodcastsParser  parser     = new PodcastsParser ();
 
             // Setting Up Log
             LogSetup.InitializeLog ("Apple_Podcasts_Bootstrapper.log", "info");
