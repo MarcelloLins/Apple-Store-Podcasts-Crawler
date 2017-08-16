@@ -13,7 +13,7 @@ If you want to host your own database, SQS queues and virtual machines, you can.
 is change the config files and the "Consts" class on the SharedLibrary to the values of your own preference (QueueNames, MongoDB Credentials/Address) 
 and Amazon Web Services Keys (that you will need in order to access your queues from code).
 
-For more detailed information, please, refer to this project's Wiki (W.I.P)
+For more detailed information, please, refer to this project's Wiki
 
 # Exporting the Database
 As people kept requesting me, i decided to export the database on it's current state. I you want the exported file, get in touch with me at : marcello.grechi@gmail.com, and I will send you the file. (I decided not to keep the file public, because there were people downloading the same file over and over again, and not paying for it, which led to a huge AWS bill that I had to pay).
