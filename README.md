@@ -27,6 +27,8 @@ My name is Marcello Lins, i am a 25 y/o developer from Brazil who works with Big
 
 http://about.me/marcellolins
 
+Visit https://techflow.me/ for more awesomeness !
+
 # What is this project about ? 
 
 The main idea of this project is to gather/mine data about Podcasts of the Apple Store and build a rich database so that developers, podcasts fans and anyone else can use to generate statistics about the current apple store situation
